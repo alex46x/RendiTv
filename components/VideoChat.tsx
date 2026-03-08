@@ -2,16 +2,24 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
-import { Mic, MicOff, Video, VideoOff, SkipForward, X, MessageSquare, Send } from 'lucide-react'
+import { LogOut, MessageSquare, Send, SkipForward } from 'lucide-react'
 
 type VideoChatProps = {
   matchId: string
   userId: string
   partnerId: string
+  localStream: MediaStream | null
+  mediaError?: string | null
+  selfName?: string
   onNext: () => void
   onStop: () => void
   allowReport?: boolean
   useMatchStatusTable?: boolean
+}
+
+type ChatMessage = {
+  sender: 'You' | 'Stranger'
+  text: string
 }
 
 function buildIceServers(): RTCIceServer[] {
@@ -76,6 +84,9 @@ export default function VideoChat({
   matchId,
   userId,
   partnerId,
+  localStream,
+  mediaError = null,
+  selfName = 'You',
   onNext,
   onStop,
   allowReport = true,
@@ -88,20 +99,32 @@ export default function VideoChat({
   const channelRef = useRef<any>(null)
   const supabase = createClient()
 
-  const [isMuted, setIsMuted] = useState(false)
-  const [isVideoOff, setIsVideoOff] = useState(false)
-  const [messages, setMessages] = useState<{sender: string, text: string}[]>([])
+  const [messages, setMessages] = useState<ChatMessage[]>([])
   const [chatInput, setChatInput] = useState('')
   const [partnerDisconnected, setPartnerDisconnected] = useState(false)
   const [connectionState, setConnectionState] = useState<string>('connecting')
   const [connectionIssue, setConnectionIssue] = useState<string | null>(null)
+  const displayConnectionIssue = connectionIssue ?? mediaError
 
   const isCaller = userId > partnerId
 
   useEffect(() => {
+    localStreamRef.current = localStream
+
+    if (!localVideoRef.current) {
+      return
+    }
+
+    localVideoRef.current.srcObject = localStream
+
+    if (localStream) {
+      void localVideoRef.current.play().catch(() => {})
+    }
+  }, [localStream])
+
+  useEffect(() => {
     let mounted = true
     let pc: RTCPeerConnection | null = null
-    let stream: MediaStream | null = null
     let channel: any = null
     let matchChannel: any = null
     let hasSentReady = false
@@ -109,6 +132,7 @@ export default function VideoChat({
     let hasSentOffer = false
     let pendingIceCandidates: RTCIceCandidateInit[] = []
     let connectionTimeoutId: ReturnType<typeof setTimeout> | null = null
+    const remoteVideoElement = remoteVideoRef.current
 
     const sendSignal = async (payload: Record<string, unknown>) => {
       if (!channel) {
@@ -177,38 +201,22 @@ export default function VideoChat({
     }
 
     const initWebRTC = async () => {
-      // 1. Get local media
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
-        if (!mounted) {
-          stream.getTracks().forEach(track => track.stop())
-          return
-        }
-        localStreamRef.current = stream
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = stream
-          void localVideoRef.current.play().catch(() => {})
-        }
-      } catch (err) {
-        console.error("Error accessing media devices.", err)
-        setConnectionIssue('Camera or microphone access failed. Allow permissions in both browsers.')
+      if (!localStreamRef.current) {
+        setConnectionIssue(mediaError ?? 'Camera preview is still loading.')
       }
 
-      // 2. Setup Peer Connection
       const configuration = {
         iceServers: buildIceServers(),
       }
       pc = new RTCPeerConnection(configuration)
       peerConnectionRef.current = pc
 
-      // Add local tracks
-      if (stream) {
-        stream.getTracks().forEach(track => {
-          pc!.addTrack(track, stream!)
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach(track => {
+          pc!.addTrack(track, localStreamRef.current!)
         })
       }
 
-      // Handle remote tracks
       pc.ontrack = (event) => {
         if (remoteVideoRef.current && event.streams[0]) {
           remoteVideoRef.current.srcObject = event.streams[0]
@@ -217,7 +225,6 @@ export default function VideoChat({
         }
       }
 
-      // Handle ICE candidates
       pc.onicecandidate = (event) => {
         if (event.candidate) {
           void sendSignal({ type: 'ice', candidate: event.candidate.toJSON() })
@@ -330,39 +337,17 @@ export default function VideoChat({
     return () => {
       mounted = false
       void channel?.httpSend('webrtc', { type: 'leave', sender: userId })
-      if (stream) {
-        stream.getTracks().forEach(track => track.stop())
-      }
       pc?.close()
+      if (remoteVideoElement) {
+        remoteVideoElement.srcObject = null
+      }
       if (channel) supabase.removeChannel(channel)
       if (matchChannel) supabase.removeChannel(matchChannel)
       if (connectionTimeoutId) {
         clearTimeout(connectionTimeoutId)
       }
     }
-  }, [matchId, userId, isCaller, supabase, useMatchStatusTable])
-
-  const toggleMute = () => {
-    const audioTracks = localStreamRef.current?.getAudioTracks() ?? []
-
-    if (audioTracks.length > 0) {
-      audioTracks.forEach(track => {
-        track.enabled = !track.enabled
-      })
-      setIsMuted(!audioTracks[0].enabled)
-    }
-  }
-
-  const toggleVideo = () => {
-    const videoTracks = localStreamRef.current?.getVideoTracks() ?? []
-
-    if (videoTracks.length > 0) {
-      videoTracks.forEach(track => {
-        track.enabled = !track.enabled
-      })
-      setIsVideoOff(!videoTracks[0].enabled)
-    }
-  }
+  }, [matchId, userId, isCaller, localStream, mediaError, supabase, useMatchStatusTable])
 
   const sendChat = (e: React.FormEvent) => {
     e.preventDefault()
@@ -399,118 +384,175 @@ export default function VideoChat({
   }
 
   return (
-    <div className="flex-1 flex flex-col md:flex-row bg-zinc-950 overflow-hidden">
-      {/* Video Area */}
-      <div className="flex-1 relative bg-black flex flex-col">
-        {/* Remote Video */}
-        <div className="flex-1 relative">
-          <video 
-            ref={remoteVideoRef} 
-            autoPlay 
-            playsInline 
-            className="w-full h-full object-cover"
+    <div className="flex h-screen flex-col overflow-hidden bg-[#050505] text-zinc-100">
+      <div className="grid min-h-0 flex-1 md:grid-cols-2">
+        <section className="relative min-h-[38vh] overflow-hidden border-b border-white/10 bg-black md:border-b-0 md:border-r">
+          <video
+            ref={remoteVideoRef}
+            autoPlay
+            playsInline
+            className="h-full w-full object-cover"
           />
+
+          <div className="pointer-events-none absolute inset-x-0 top-0 flex items-center justify-between p-4">
+            <div className="rounded-full border border-white/10 bg-black/50 px-4 py-1.5 text-sm text-zinc-200 backdrop-blur">
+              Unknown user
+            </div>
+            <div className="rounded-full border border-white/10 bg-black/50 px-4 py-1.5 text-xs uppercase tracking-[0.22em] text-zinc-400 backdrop-blur">
+              Left
+            </div>
+          </div>
+
           {partnerDisconnected && (
-            <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center text-white z-10">
-              <p className="text-xl font-semibold mb-4">Stranger has disconnected</p>
-              <button 
+            <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-black/80 px-6 text-center">
+              <p className="text-2xl font-semibold">Stranger has left the chat</p>
+              <p className="mt-3 max-w-md text-sm text-zinc-400">
+                Your camera stays on while you remain on this page. Jump to the next stranger when you are ready.
+              </p>
+              <button
                 onClick={onNext}
-                className="px-6 py-3 bg-indigo-600 rounded-full font-medium hover:bg-indigo-700 transition flex items-center gap-2"
+                className="mt-6 inline-flex items-center gap-2 rounded-full bg-indigo-600 px-6 py-3 font-medium text-white transition hover:bg-indigo-500"
               >
-                <SkipForward size={20} />
-                Find Next
+                <SkipForward size={18} />
+                Next Stranger
               </button>
             </div>
           )}
+
           {connectionState === 'connecting' && !partnerDisconnected && (
-            <div className="absolute inset-0 bg-black/50 flex items-center justify-center text-white z-10">
-              <div className="max-w-md px-6 text-center space-y-3">
-                <p className="animate-pulse">Connecting...</p>
-                {connectionIssue && (
-                  <p className="text-sm text-zinc-300">{connectionIssue}</p>
+            <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/45 px-6 text-center">
+              <div className="max-w-md space-y-3">
+                <p className="text-lg font-medium tracking-wide text-white">Connecting...</p>
+                {displayConnectionIssue && (
+                  <p className="text-sm leading-6 text-zinc-300">{displayConnectionIssue}</p>
                 )}
               </div>
             </div>
           )}
-        </div>
+        </section>
 
-        {/* Local Video (PiP) */}
-        <div className="absolute bottom-20 right-4 md:bottom-4 md:right-4 w-32 h-48 md:w-48 md:h-64 bg-zinc-800 rounded-xl overflow-hidden border-2 border-zinc-700 shadow-xl z-20">
-          <video 
-            ref={localVideoRef} 
-            autoPlay 
-            playsInline 
-            muted 
-            className="w-full h-full object-cover transform scale-x-[-1]"
+        <section className="relative min-h-[38vh] overflow-hidden bg-zinc-950">
+          <video
+            ref={localVideoRef}
+            autoPlay
+            playsInline
+            muted
+            className="h-full w-full scale-x-[-1] object-cover"
           />
-        </div>
 
-        {/* Controls Overlay */}
-        <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/80 to-transparent flex items-center justify-between z-30">
-          <div className="flex items-center gap-3">
-            <button onClick={toggleMute} className={`p-3 rounded-full ${isMuted ? 'bg-red-500 text-white' : 'bg-zinc-800/80 text-white hover:bg-zinc-700'} backdrop-blur-sm transition`}>
-              {isMuted ? <MicOff size={20} /> : <Mic size={20} />}
-            </button>
-            <button onClick={toggleVideo} className={`p-3 rounded-full ${isVideoOff ? 'bg-red-500 text-white' : 'bg-zinc-800/80 text-white hover:bg-zinc-700'} backdrop-blur-sm transition`}>
-              {isVideoOff ? <VideoOff size={20} /> : <Video size={20} />}
-            </button>
+          <div className="pointer-events-none absolute inset-x-0 top-0 flex items-center justify-between p-4">
+            <div className="rounded-full border border-white/10 bg-black/50 px-4 py-1.5 text-sm text-zinc-200 backdrop-blur">
+              {selfName}
+            </div>
+            <div className="rounded-full border border-white/10 bg-black/50 px-4 py-1.5 text-xs uppercase tracking-[0.22em] text-zinc-400 backdrop-blur">
+              Right
+            </div>
           </div>
-          
-          <div className="flex items-center gap-3">
-            {allowReport && (
-              <button onClick={handleReport} className="text-xs text-zinc-400 hover:text-red-400 transition mr-2">
-                Report
-              </button>
-            )}
-            <button onClick={onStop} className="p-3 bg-zinc-800/80 text-white rounded-full hover:bg-zinc-700 backdrop-blur-sm transition">
-              <X size={20} />
-            </button>
-            <button onClick={onNext} className="px-6 py-3 bg-indigo-600 text-white rounded-full font-medium hover:bg-indigo-700 transition flex items-center gap-2 shadow-lg">
-              <SkipForward size={20} />
-              <span className="hidden sm:inline">Next</span>
-            </button>
-          </div>
-        </div>
+
+          {!localStream && (
+            <div className="absolute inset-0 flex items-center justify-center bg-zinc-950/85 px-6 text-center">
+              <p className="max-w-sm text-sm text-zinc-300">
+              {displayConnectionIssue ?? 'Waiting for camera preview...'}
+              </p>
+            </div>
+          )}
+        </section>
       </div>
 
-      {/* Chat Area */}
-      <div className="w-full md:w-80 lg:w-96 bg-zinc-900 border-l border-zinc-800 flex flex-col h-64 md:h-auto z-40">
-        <div className="p-4 border-b border-zinc-800 flex items-center gap-2 text-zinc-100 font-medium">
-          <MessageSquare size={18} />
-          Chat
-        </div>
-        
-        <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          <div className="text-center text-xs text-zinc-500 my-2">
-            You&apos;re now chatting with a random stranger. Say hi!
+      <div className="grid min-h-[310px] border-t border-white/10 bg-[#090a0e] md:grid-cols-[320px_minmax(0,1fr)]">
+        <aside className="flex flex-col gap-4 border-b border-white/10 bg-zinc-100/[0.03] p-4 md:border-b-0 md:border-r">
+          <div className="rounded-[28px] border border-white/10 bg-zinc-950/90 p-5">
+            <p className="text-[11px] uppercase tracking-[0.24em] text-zinc-500">Session</p>
+            <p className="mt-4 text-2xl font-semibold text-white">
+              {connectionState === 'connected' ? 'You are live' : 'Waiting for stranger'}
+            </p>
+            <p className="mt-3 text-sm leading-6 text-zinc-400">
+              {displayConnectionIssue ?? 'Your own camera stays visible on the right until you leave this page.'}
+            </p>
           </div>
-          {messages.map((msg, i) => (
-            <div key={i} className={`flex flex-col ${msg.sender === 'You' ? 'items-end' : 'items-start'}`}>
-              <span className="text-[10px] text-zinc-500 mb-1 px-1">{msg.sender}</span>
-              <div className={`px-4 py-2 rounded-2xl max-w-[85%] text-sm ${msg.sender === 'You' ? 'bg-indigo-600 text-white rounded-br-sm' : 'bg-zinc-800 text-zinc-200 rounded-bl-sm'}`}>
-                {msg.text}
-              </div>
-            </div>
-          ))}
-        </div>
 
-        <form onSubmit={sendChat} className="p-3 border-t border-zinc-800 flex gap-2 bg-zinc-900">
-          <input
-            type="text"
-            value={chatInput}
-            onChange={(e) => setChatInput(e.target.value)}
-            placeholder="Type a message..."
-            className="flex-1 bg-zinc-800 text-zinc-100 px-4 py-2 rounded-full text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500 border border-zinc-700"
-            disabled={partnerDisconnected}
-          />
-          <button 
-            type="submit" 
-            disabled={!chatInput.trim() || partnerDisconnected}
-            className="p-2 bg-indigo-600 text-white rounded-full hover:bg-indigo-700 disabled:opacity-50 transition flex-shrink-0"
+          <button
+            onClick={onNext}
+            className="rounded-[28px] bg-emerald-500/85 px-5 py-6 text-left shadow-lg shadow-emerald-950/30 transition hover:bg-emerald-400"
           >
-            <Send size={18} />
+            <span className="block text-[11px] uppercase tracking-[0.24em] text-emerald-950/80">Action</span>
+            <span className="mt-3 block text-3xl font-semibold text-white">Next</span>
+            <span className="mt-2 block text-sm text-emerald-950/80">Find a new unknown user instantly.</span>
           </button>
-        </form>
+
+          <button
+            onClick={onStop}
+            className="rounded-[28px] bg-rose-300/85 px-5 py-6 text-left shadow-lg shadow-rose-950/20 transition hover:bg-rose-200"
+          >
+            <span className="block text-[11px] uppercase tracking-[0.24em] text-rose-950/70">Action</span>
+            <span className="mt-3 block text-3xl font-semibold text-white">Leave</span>
+            <span className="mt-2 block text-sm text-rose-950/70">Return to the queue without turning your camera off.</span>
+          </button>
+
+          {allowReport && (
+            <button
+              onClick={handleReport}
+              className="rounded-[24px] border border-red-500/20 bg-red-500/10 px-4 py-3 text-left text-sm text-red-200 transition hover:bg-red-500/15"
+            >
+              Report this user
+            </button>
+          )}
+        </aside>
+
+        <section className="flex min-h-0 flex-col bg-zinc-950/80">
+          <div className="flex items-center gap-3 border-b border-white/10 px-5 py-4">
+            <div className="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/10 bg-white/5">
+              <MessageSquare size={18} />
+            </div>
+            <div>
+              <p className="text-base font-semibold text-white">Chat</p>
+              <p className="text-xs text-zinc-500">Left side is the stranger. Right side is your live camera.</p>
+            </div>
+          </div>
+
+          <div className="flex-1 overflow-y-auto px-5 py-4">
+            <div className="space-y-4">
+              <div className="text-center text-xs text-zinc-500">
+                You&apos;re now chatting with a random stranger. Say hi!
+              </div>
+              {messages.map((msg, i) => (
+                <div key={i} className={`flex flex-col ${msg.sender === 'You' ? 'items-end' : 'items-start'}`}>
+                  <span className="mb-1 px-1 text-[10px] text-zinc-500">{msg.sender}</span>
+                  <div className={`max-w-[85%] rounded-3xl px-4 py-3 text-sm ${msg.sender === 'You' ? 'rounded-br-md bg-indigo-600 text-white' : 'rounded-bl-md bg-zinc-800 text-zinc-100'}`}>
+                    {msg.text}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="border-t border-white/10 px-5 py-4">
+            <form onSubmit={sendChat} className="flex items-center gap-3">
+              <input
+                type="text"
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                placeholder="Write a message..."
+                className="h-12 flex-1 rounded-full border border-zinc-800 bg-zinc-900 px-5 text-sm text-zinc-100 outline-none transition focus:border-indigo-500"
+                disabled={partnerDisconnected}
+              />
+              <button
+                type="submit"
+                disabled={!chatInput.trim() || partnerDisconnected}
+                className="inline-flex h-12 w-12 items-center justify-center rounded-full bg-indigo-600 text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Send size={18} />
+              </button>
+              <button
+                type="button"
+                onClick={onStop}
+                className="inline-flex h-12 w-12 items-center justify-center rounded-full border border-white/10 bg-zinc-900 text-zinc-300 transition hover:border-white/20 hover:text-white"
+              >
+                <LogOut size={18} />
+              </button>
+            </form>
+          </div>
+        </section>
       </div>
     </div>
   )

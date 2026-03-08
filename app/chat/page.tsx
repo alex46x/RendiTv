@@ -37,6 +37,8 @@ export default function ChatDashboard() {
     readGuestSession,
     () => undefined as GuestSession | null | undefined
   )
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null)
+  const [mediaError, setMediaError] = useState<string | null>(null)
   const [inQueue, setInQueue] = useState(false)
   const [matchId, setMatchId] = useState<string | null>(null)
   const [partnerId, setPartnerId] = useState<string | null>(null)
@@ -147,6 +149,35 @@ export default function ChatDashboard() {
   }, [guest, router])
 
   useEffect(() => {
+    let mounted = true
+    let stream: MediaStream | null = null
+
+    const initLocalMedia = async () => {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+
+        if (!mounted) {
+          stream.getTracks().forEach((track) => track.stop())
+          return
+        }
+
+        setLocalStream(stream)
+        setMediaError(null)
+      } catch (error) {
+        console.error('Unable to access camera/microphone:', error)
+        setMediaError('Allow camera and microphone access before joining chat.')
+      }
+    }
+
+    void initLocalMedia()
+
+    return () => {
+      mounted = false
+      stream?.getTracks().forEach((track) => track.stop())
+    }
+  }, [])
+
+  useEffect(() => {
     return () => {
       clearPairAttempt()
 
@@ -165,6 +196,11 @@ export default function ChatDashboard() {
   const joinQueue = async () => {
     if (!guest) {
       router.push('/')
+      return
+    }
+
+    if (!localStream) {
+      setQueueError(mediaError ?? 'Camera is still loading. Allow permission and try again.')
       return
     }
 
@@ -274,6 +310,25 @@ export default function ChatDashboard() {
     return <div className="min-h-screen flex items-center justify-center bg-zinc-900 text-white">Loading...</div>
   }
 
+  if (matchId && partnerId) {
+    return (
+      <div className="min-h-screen bg-zinc-950 text-zinc-100">
+        <VideoChat
+          matchId={matchId}
+          userId={guest.id}
+          partnerId={partnerId}
+          localStream={localStream}
+          mediaError={mediaError}
+          selfName={guest.username}
+          onNext={handleNext}
+          onStop={handleStop}
+          allowReport={false}
+          useMatchStatusTable={false}
+        />
+      </div>
+    )
+  }
+
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col font-sans">
       <header className="h-16 border-b border-zinc-800 flex items-center justify-between px-4 md:px-6 bg-zinc-900/50 backdrop-blur-md">
@@ -293,56 +348,45 @@ export default function ChatDashboard() {
       </header>
 
       <main className="flex-1 flex flex-col relative overflow-hidden">
-        {!matchId || !partnerId ? (
-          <div className="flex-1 flex flex-col items-center justify-center p-4">
-            <div className="max-w-md w-full text-center space-y-6">
-              <div className="w-24 h-24 bg-zinc-900 rounded-full flex items-center justify-center mx-auto border border-zinc-800 shadow-2xl">
-                <div className={`w-16 h-16 rounded-full ${inQueue ? 'bg-indigo-500 animate-pulse' : 'bg-zinc-800'}`} />
-              </div>
+        <div className="flex-1 flex flex-col items-center justify-center p-4">
+          <div className="max-w-md w-full text-center space-y-6">
+            <div className="w-24 h-24 bg-zinc-900 rounded-full flex items-center justify-center mx-auto border border-zinc-800 shadow-2xl">
+              <div className={`w-16 h-16 rounded-full ${inQueue ? 'bg-indigo-500 animate-pulse' : 'bg-zinc-800'}`} />
+            </div>
 
-              <div>
-                <h2 className="text-2xl font-semibold mb-2">
-                  {inQueue ? 'Looking for someone...' : 'Ready to chat?'}
-                </h2>
-                <p className="text-zinc-400">
-                  {inQueue
-                    ? 'Guest mode is searching for another random person in the lobby.'
-                    : 'Click start to enter the guest queue with your username.'}
-                </p>
-              </div>
+            <div>
+              <h2 className="text-2xl font-semibold mb-2">
+                {inQueue ? 'Looking for someone...' : 'Ready to chat?'}
+              </h2>
+              <p className="text-zinc-400">
+                {inQueue
+                  ? 'Your camera stays live while we search for the next stranger.'
+                  : 'Join with your username. Country and gender filters are disabled.'}
+              </p>
+            </div>
 
-              {queueError && <p className="text-red-400 text-sm">{queueError}</p>}
+            {mediaError && <p className="text-amber-300 text-sm">{mediaError}</p>}
+            {queueError && <p className="text-red-400 text-sm">{queueError}</p>}
 
-              <div className="pt-4">
-                {inQueue ? (
-                  <button
-                    onClick={handleStop}
-                    className="px-8 py-3 bg-zinc-800 text-white rounded-full font-medium hover:bg-zinc-700 transition w-full sm:w-auto"
-                  >
-                    Cancel
-                  </button>
-                ) : (
-                  <button
-                    onClick={joinQueue}
-                    className="px-8 py-3 bg-indigo-600 text-white rounded-full font-medium hover:bg-indigo-700 transition w-full sm:w-auto shadow-lg shadow-indigo-500/20"
-                  >
-                    Start Chatting
-                  </button>
-                )}
-              </div>
+            <div className="pt-4">
+              {inQueue ? (
+                <button
+                  onClick={handleStop}
+                  className="px-8 py-3 bg-zinc-800 text-white rounded-full font-medium hover:bg-zinc-700 transition w-full sm:w-auto"
+                >
+                  Cancel
+                </button>
+              ) : (
+                <button
+                  onClick={joinQueue}
+                  className="px-8 py-3 bg-indigo-600 text-white rounded-full font-medium hover:bg-indigo-700 transition w-full sm:w-auto shadow-lg shadow-indigo-500/20"
+                >
+                  Start Chatting
+                </button>
+              )}
             </div>
           </div>
-        ) : (
-          <VideoChat
-            matchId={matchId}
-            userId={guest.id}
-            partnerId={partnerId}
-            onNext={handleNext}
-            onStop={handleStop}
-            allowReport={false}
-            useMatchStatusTable={false}
-          />
-        )}
+        </div>
       </main>
     </div>
   )
