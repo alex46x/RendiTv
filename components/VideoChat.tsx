@@ -14,6 +14,30 @@ type VideoChatProps = {
   useMatchStatusTable?: boolean
 }
 
+function buildIceServers(): RTCIceServer[] {
+  const iceServers: RTCIceServer[] = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+  ]
+
+  const turnUrls = process.env.NEXT_PUBLIC_TURN_URLS
+    ?.split(',')
+    .map((value) => value.trim())
+    .filter(Boolean)
+
+  if (!turnUrls || turnUrls.length === 0) {
+    return iceServers
+  }
+
+  iceServers.push({
+    urls: turnUrls.length === 1 ? turnUrls[0] : turnUrls,
+    username: process.env.NEXT_PUBLIC_TURN_USERNAME,
+    credential: process.env.NEXT_PUBLIC_TURN_CREDENTIAL,
+  })
+
+  return iceServers
+}
+
 export default function VideoChat({
   matchId,
   userId,
@@ -48,6 +72,7 @@ export default function VideoChat({
     let hasSentReady = false
     let hasSentReadyAck = false
     let hasSentOffer = false
+    let pendingIceCandidates: RTCIceCandidateInit[] = []
 
     const sendSignal = async (payload: Record<string, unknown>) => {
       if (!channel) {
@@ -62,6 +87,36 @@ export default function VideoChat({
           sender: userId,
         },
       })
+    }
+
+    const flushPendingIceCandidates = async () => {
+      if (!pc?.remoteDescription || pendingIceCandidates.length === 0) {
+        return
+      }
+
+      const queuedCandidates = [...pendingIceCandidates]
+      pendingIceCandidates = []
+
+      for (const candidate of queuedCandidates) {
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(candidate))
+        } catch (err) {
+          console.error('Error applying queued ICE candidate', err)
+        }
+      }
+    }
+
+    const addRemoteIceCandidate = async (candidate: RTCIceCandidateInit) => {
+      if (!pc?.remoteDescription) {
+        pendingIceCandidates.push(candidate)
+        return
+      }
+
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(candidate))
+      } catch (err) {
+        console.error('Error adding ICE candidate', err)
+      }
     }
 
     const maybeCreateOffer = async () => {
@@ -92,6 +147,7 @@ export default function VideoChat({
         localStreamRef.current = stream
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = stream
+          void localVideoRef.current.play().catch(() => {})
         }
       } catch (err) {
         console.error("Error accessing media devices.", err)
@@ -99,12 +155,8 @@ export default function VideoChat({
       }
 
       // 2. Setup Peer Connection
-      // Using Google's public STUN servers for MVP
       const configuration = {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' }
-        ]
+        iceServers: buildIceServers(),
       }
       pc = new RTCPeerConnection(configuration)
       peerConnectionRef.current = pc
@@ -120,6 +172,8 @@ export default function VideoChat({
       pc.ontrack = (event) => {
         if (remoteVideoRef.current && event.streams[0]) {
           remoteVideoRef.current.srcObject = event.streams[0]
+          setConnectionState('connected')
+          void remoteVideoRef.current.play().catch(() => {})
         }
       }
 
@@ -133,6 +187,20 @@ export default function VideoChat({
       pc.onconnectionstatechange = () => {
         setConnectionState(pc!.connectionState)
         if (pc!.connectionState === 'disconnected' || pc!.connectionState === 'failed' || pc!.connectionState === 'closed') {
+          setPartnerDisconnected(true)
+        }
+      }
+
+      pc.oniceconnectionstatechange = () => {
+        if (!pc) {
+          return
+        }
+
+        if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+          setConnectionState('connected')
+        }
+
+        if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
           setPartnerDisconnected(true)
         }
       }
@@ -156,13 +224,15 @@ export default function VideoChat({
             await maybeCreateOffer()
           } else if (payload.type === 'offer') {
             await pc!.setRemoteDescription(new RTCSessionDescription(payload.offer))
+            await flushPendingIceCandidates()
             const answer = await pc!.createAnswer()
             await pc!.setLocalDescription(answer)
             await sendSignal({ type: 'answer', answer })
           } else if (payload.type === 'answer') {
             await pc!.setRemoteDescription(new RTCSessionDescription(payload.answer))
+            await flushPendingIceCandidates()
           } else if (payload.type === 'ice') {
-            await pc!.addIceCandidate(new RTCIceCandidate(payload.candidate))
+            await addRemoteIceCandidate(payload.candidate)
           } else if (payload.type === 'chat') {
             setMessages(prev => [...prev, { sender: 'Stranger', text: payload.text }])
           } else if (payload.type === 'leave') {
