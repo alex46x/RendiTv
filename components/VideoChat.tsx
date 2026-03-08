@@ -115,14 +115,14 @@ export default function VideoChat({
         return
       }
 
-      await channel.send({
-        type: 'broadcast',
-        event: 'webrtc',
-        payload: {
-          ...payload,
-          sender: userId,
-        },
+      const result = await channel.httpSend('webrtc', {
+        ...payload,
+        sender: userId,
       })
+
+      if (!result.success) {
+        throw new Error(result.error)
+      }
     }
 
     const flushPendingIceCandidates = async () => {
@@ -329,11 +329,7 @@ export default function VideoChat({
 
     return () => {
       mounted = false
-      channel?.send({
-        type: 'broadcast',
-        event: 'webrtc',
-        payload: { type: 'leave', sender: userId }
-      })
+      void channel?.httpSend('webrtc', { type: 'leave', sender: userId })
       if (stream) {
         stream.getTracks().forEach(track => track.stop())
       }
@@ -373,10 +369,10 @@ export default function VideoChat({
     if (!chatInput.trim()) return
     
     setMessages(prev => [...prev, { sender: 'You', text: chatInput }])
-    channelRef.current?.send({
-      type: 'broadcast',
-      event: 'webrtc',
-      payload: { type: 'chat', text: chatInput, sender: userId }
+    void channelRef.current?.httpSend('webrtc', {
+      type: 'chat',
+      text: chatInput,
+      sender: userId,
     })
     setChatInput('')
   }

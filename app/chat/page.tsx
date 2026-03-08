@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { useRouter } from 'next/navigation'
 import type { RealtimeChannel } from '@supabase/supabase-js'
 import { createClient } from '@/lib/supabase/client'
@@ -32,7 +32,24 @@ export default function ChatDashboard() {
   const router = useRouter()
   const supabase = createClient()
 
-  const [guest] = useState<GuestSession | null>(() => readGuestSession())
+  const guest = useSyncExternalStore(
+    (onStoreChange) => {
+      if (typeof window === 'undefined') {
+        return () => {}
+      }
+
+      const handleStorage = (event: StorageEvent) => {
+        if (event.key === 'randomchat-guest-session') {
+          onStoreChange()
+        }
+      }
+
+      window.addEventListener('storage', handleStorage)
+      return () => window.removeEventListener('storage', handleStorage)
+    },
+    readGuestSession,
+    () => undefined as GuestSession | null | undefined
+  )
   const [inQueue, setInQueue] = useState(false)
   const [matchId, setMatchId] = useState<string | null>(null)
   const [partnerId, setPartnerId] = useState<string | null>(null)
@@ -63,6 +80,18 @@ export default function ChatDashboard() {
   const setQueueState = (nextInQueue: boolean) => {
     inQueueRef.current = nextInQueue
     setInQueue(nextInQueue)
+  }
+
+  const sendLobbyBroadcast = async (
+    channel: RealtimeChannel,
+    event: 'pair-offer' | 'pair-accept',
+    payload: PairOfferPayload | PairAcceptPayload
+  ) => {
+    const result = await channel.httpSend(event, payload)
+
+    if (!result.success) {
+      throw new Error(result.error)
+    }
   }
 
   const listWaitingGuests = (channel: RealtimeChannel) => {
@@ -106,15 +135,14 @@ export default function ChatDashboard() {
     const pairId = [currentGuest.id, partner.guestId].sort().join(':')
     pendingPairIdRef.current = pairId
 
-    void channel.send({
-      type: 'broadcast',
-      event: 'pair-offer',
-      payload: {
-        pairId,
-        senderId: currentGuest.id,
-        senderName: currentGuest.username,
-        targetId: partner.guestId,
-      } satisfies PairOfferPayload,
+    void sendLobbyBroadcast(channel, 'pair-offer', {
+      pairId,
+      senderId: currentGuest.id,
+      senderName: currentGuest.username,
+      targetId: partner.guestId,
+    }).catch((error) => {
+      console.error('Failed to send pair offer:', error)
+      clearPairAttempt()
     })
 
     pairingTimeoutRef.current = setTimeout(() => {
@@ -126,7 +154,7 @@ export default function ChatDashboard() {
   }
 
   useEffect(() => {
-    if (!guest) {
+    if (guest === null) {
       router.push('/')
     }
   }, [guest, router])
@@ -188,15 +216,11 @@ export default function ChatDashboard() {
           return
         }
 
-        await channel.send({
-          type: 'broadcast',
-          event: 'pair-accept',
-          payload: {
-            pairId: offer.pairId,
-            senderId: guest.id,
-            senderName: guest.username,
-            targetId: offer.senderId,
-          } satisfies PairAcceptPayload,
+        await sendLobbyBroadcast(channel, 'pair-accept', {
+          pairId: offer.pairId,
+          senderId: guest.id,
+          senderName: guest.username,
+          targetId: offer.senderId,
         })
 
         activateMatch(offer.pairId, offer.senderId)
@@ -259,7 +283,7 @@ export default function ChatDashboard() {
     router.push('/')
   }
 
-  if (!guest) {
+  if (guest === undefined || !guest) {
     return <div className="min-h-screen flex items-center justify-center bg-zinc-900 text-white">Loading...</div>
   }
 
