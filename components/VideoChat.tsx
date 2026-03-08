@@ -311,7 +311,7 @@ export default function VideoChat({
         }
 
         setConnectionIssue((current) => (
-          current ?? 'Still connecting. If you are testing locally, use two separate browsers/profiles and allow camera/mic on both sides.'
+          current ?? 'Chat signaling is connected, but video/audio is not. This browser or network pair likely needs a TURN server.'
         ))
       }, 12000)
     }
