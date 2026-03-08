@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { useRouter } from 'next/navigation'
 import type { RealtimeChannel } from '@supabase/supabase-js'
 import { createClient } from '@/lib/supabase/client'
-import { clearGuestSession, readGuestSession, type GuestSession } from '@/lib/guest-session'
+import { clearGuestSession, readGuestSession, subscribeToGuestSession, type GuestSession } from '@/lib/guest-session'
 import VideoChat from '@/components/VideoChat'
 import { LogOut, User as UserIcon } from 'lucide-react'
 
@@ -33,20 +33,7 @@ export default function ChatDashboard() {
   const supabase = createClient()
 
   const guest = useSyncExternalStore(
-    (onStoreChange) => {
-      if (typeof window === 'undefined') {
-        return () => {}
-      }
-
-      const handleStorage = (event: StorageEvent) => {
-        if (event.key === 'randomchat-guest-session') {
-          onStoreChange()
-        }
-      }
-
-      window.addEventListener('storage', handleStorage)
-      return () => window.removeEventListener('storage', handleStorage)
-    },
+    subscribeToGuestSession,
     readGuestSession,
     () => undefined as GuestSession | null | undefined
   )
