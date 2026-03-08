@@ -38,6 +38,40 @@ function buildIceServers(): RTCIceServer[] {
   return iceServers
 }
 
+async function waitForIceGatheringComplete(pc: RTCPeerConnection, timeoutMs = 2000) {
+  if (pc.iceGatheringState === 'complete') {
+    return
+  }
+
+  await new Promise<void>((resolve) => {
+    let settled = false
+
+    const cleanup = () => {
+      pc.removeEventListener('icegatheringstatechange', handleStateChange)
+      clearTimeout(timeoutId)
+    }
+
+    const finish = () => {
+      if (settled) {
+        return
+      }
+
+      settled = true
+      cleanup()
+      resolve()
+    }
+
+    const handleStateChange = () => {
+      if (pc.iceGatheringState === 'complete') {
+        finish()
+      }
+    }
+
+    const timeoutId = setTimeout(finish, timeoutMs)
+    pc.addEventListener('icegatheringstatechange', handleStateChange)
+  })
+}
+
 export default function VideoChat({
   matchId,
   userId,
@@ -60,6 +94,7 @@ export default function VideoChat({
   const [chatInput, setChatInput] = useState('')
   const [partnerDisconnected, setPartnerDisconnected] = useState(false)
   const [connectionState, setConnectionState] = useState<string>('connecting')
+  const [connectionIssue, setConnectionIssue] = useState<string | null>(null)
 
   const isCaller = userId > partnerId
 
@@ -73,6 +108,7 @@ export default function VideoChat({
     let hasSentReadyAck = false
     let hasSentOffer = false
     let pendingIceCandidates: RTCIceCandidateInit[] = []
+    let connectionTimeoutId: ReturnType<typeof setTimeout> | null = null
 
     const sendSignal = async (payload: Record<string, unknown>) => {
       if (!channel) {
@@ -129,7 +165,11 @@ export default function VideoChat({
       try {
         const offer = await pc.createOffer()
         await pc.setLocalDescription(offer)
-        await sendSignal({ type: 'offer', offer })
+        await waitForIceGatheringComplete(pc)
+        await sendSignal({
+          type: 'offer',
+          offer: pc.localDescription?.toJSON() ?? offer,
+        })
       } catch (err) {
         hasSentOffer = false
         console.error('Error creating offer', err)
@@ -151,7 +191,7 @@ export default function VideoChat({
         }
       } catch (err) {
         console.error("Error accessing media devices.", err)
-        // Handle gracefully, maybe they don't have a camera
+        setConnectionIssue('Camera or microphone access failed. Allow permissions in both browsers.')
       }
 
       // 2. Setup Peer Connection
@@ -180,12 +220,15 @@ export default function VideoChat({
       // Handle ICE candidates
       pc.onicecandidate = (event) => {
         if (event.candidate) {
-          void sendSignal({ type: 'ice', candidate: event.candidate })
+          void sendSignal({ type: 'ice', candidate: event.candidate.toJSON() })
         }
       }
 
       pc.onconnectionstatechange = () => {
         setConnectionState(pc!.connectionState)
+        if (pc!.connectionState === 'connected') {
+          setConnectionIssue(null)
+        }
         if (pc!.connectionState === 'disconnected' || pc!.connectionState === 'failed' || pc!.connectionState === 'closed') {
           setPartnerDisconnected(true)
         }
@@ -198,11 +241,21 @@ export default function VideoChat({
 
         if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
           setConnectionState('connected')
+          setConnectionIssue(null)
         }
 
-        if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+        if (pc.iceConnectionState === 'failed') {
+          setConnectionIssue('Media connection failed. TURN server may be required for this network.')
           setPartnerDisconnected(true)
         }
+
+        if (pc.iceConnectionState === 'disconnected') {
+          setPartnerDisconnected(true)
+        }
+      }
+
+      pc.onicecandidateerror = () => {
+        setConnectionIssue('ICE candidate gathering failed. TURN server may be required for this network.')
       }
 
       // 3. Setup Supabase Realtime Channel
@@ -223,13 +276,17 @@ export default function VideoChat({
           } else if (payload.type === 'ready-ack') {
             await maybeCreateOffer()
           } else if (payload.type === 'offer') {
-            await pc!.setRemoteDescription(new RTCSessionDescription(payload.offer))
+            await pc!.setRemoteDescription(payload.offer)
             await flushPendingIceCandidates()
             const answer = await pc!.createAnswer()
             await pc!.setLocalDescription(answer)
-            await sendSignal({ type: 'answer', answer })
+            await waitForIceGatheringComplete(pc!)
+            await sendSignal({
+              type: 'answer',
+              answer: pc!.localDescription?.toJSON() ?? answer,
+            })
           } else if (payload.type === 'answer') {
-            await pc!.setRemoteDescription(new RTCSessionDescription(payload.answer))
+            await pc!.setRemoteDescription(payload.answer)
             await flushPendingIceCandidates()
           } else if (payload.type === 'ice') {
             await addRemoteIceCandidate(payload.candidate)
@@ -247,6 +304,16 @@ export default function VideoChat({
           await sendSignal({ type: 'ready' })
         }
       })
+
+      connectionTimeoutId = setTimeout(() => {
+        if (!mounted) {
+          return
+        }
+
+        setConnectionIssue((current) => (
+          current ?? 'Still connecting. If you are testing locally, use two separate browsers/profiles and allow camera/mic on both sides.'
+        ))
+      }, 12000)
     }
 
     initWebRTC()
@@ -273,6 +340,9 @@ export default function VideoChat({
       pc?.close()
       if (channel) supabase.removeChannel(channel)
       if (matchChannel) supabase.removeChannel(matchChannel)
+      if (connectionTimeoutId) {
+        clearTimeout(connectionTimeoutId)
+      }
     }
   }, [matchId, userId, isCaller, supabase, useMatchStatusTable])
 
@@ -358,7 +428,12 @@ export default function VideoChat({
           )}
           {connectionState === 'connecting' && !partnerDisconnected && (
             <div className="absolute inset-0 bg-black/50 flex items-center justify-center text-white z-10">
-              <p className="animate-pulse">Connecting...</p>
+              <div className="max-w-md px-6 text-center space-y-3">
+                <p className="animate-pulse">Connecting...</p>
+                {connectionIssue && (
+                  <p className="text-sm text-zinc-300">{connectionIssue}</p>
+                )}
+              </div>
             </div>
           )}
         </div>
