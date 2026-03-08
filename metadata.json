@@ -1,0 +1,8 @@
+{
+  "name": "Random Video Chat",
+  "description": "A low-cost random video chat web app similar to OmeTV/Omegle.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
