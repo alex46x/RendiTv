@@ -45,6 +45,41 @@ export default function VideoChat({
     let stream: MediaStream | null = null
     let channel: any = null
     let matchChannel: any = null
+    let hasSentReady = false
+    let hasSentReadyAck = false
+    let hasSentOffer = false
+
+    const sendSignal = async (payload: Record<string, unknown>) => {
+      if (!channel) {
+        return
+      }
+
+      await channel.send({
+        type: 'broadcast',
+        event: 'webrtc',
+        payload: {
+          ...payload,
+          sender: userId,
+        },
+      })
+    }
+
+    const maybeCreateOffer = async () => {
+      if (!isCaller || !pc || !channel || hasSentOffer) {
+        return
+      }
+
+      hasSentOffer = true
+
+      try {
+        const offer = await pc.createOffer()
+        await pc.setLocalDescription(offer)
+        await sendSignal({ type: 'offer', offer })
+      } catch (err) {
+        hasSentOffer = false
+        console.error('Error creating offer', err)
+      }
+    }
 
     const initWebRTC = async () => {
       // 1. Get local media
@@ -91,11 +126,7 @@ export default function VideoChat({
       // Handle ICE candidates
       pc.onicecandidate = (event) => {
         if (event.candidate) {
-          channel?.send({
-            type: 'broadcast',
-            event: 'webrtc',
-            payload: { type: 'ice', candidate: event.candidate, sender: userId }
-          })
+          void sendSignal({ type: 'ice', candidate: event.candidate })
         }
       }
 
@@ -114,15 +145,20 @@ export default function VideoChat({
         if (payload.sender === userId) return // Ignore own messages
 
         try {
-          if (payload.type === 'offer') {
+          if (payload.type === 'ready') {
+            if (!hasSentReadyAck) {
+              hasSentReadyAck = true
+              await sendSignal({ type: 'ready-ack' })
+            }
+
+            await maybeCreateOffer()
+          } else if (payload.type === 'ready-ack') {
+            await maybeCreateOffer()
+          } else if (payload.type === 'offer') {
             await pc!.setRemoteDescription(new RTCSessionDescription(payload.offer))
             const answer = await pc!.createAnswer()
             await pc!.setLocalDescription(answer)
-            channel.send({
-              type: 'broadcast',
-              event: 'webrtc',
-              payload: { type: 'answer', answer, sender: userId }
-            })
+            await sendSignal({ type: 'answer', answer })
           } else if (payload.type === 'answer') {
             await pc!.setRemoteDescription(new RTCSessionDescription(payload.answer))
           } else if (payload.type === 'ice') {
@@ -136,19 +172,9 @@ export default function VideoChat({
           console.error("Error handling WebRTC message", err)
         }
       }).subscribe(async (status: string) => {
-        if (status === 'SUBSCRIBED' && isCaller) {
-          // Caller initiates the offer
-          try {
-            const offer = await pc!.createOffer()
-            await pc!.setLocalDescription(offer)
-            channel.send({
-              type: 'broadcast',
-              event: 'webrtc',
-              payload: { type: 'offer', offer, sender: userId }
-            })
-          } catch (err) {
-            console.error("Error creating offer", err)
-          }
+        if (status === 'SUBSCRIBED' && !hasSentReady) {
+          hasSentReady = true
+          await sendSignal({ type: 'ready' })
         }
       })
     }
